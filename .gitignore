@@ -24,11 +24,18 @@ profile.cov
 go.work
 go.work.sum
 
-# env file
+# env / secrets
 .env
+.env.*
+!.env.example
 
 # Editor/IDE
 # .idea/
 # .vscode/
-sent_contests.json
-sent_contest_messages.json
+# generated bot state
+sent_contests*.json
+sent_contest_messages*.json
+
+# local editor noise
+.DS_Store
+*.swp

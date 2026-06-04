@@ -31,6 +31,27 @@ Start the bot from the project root:
 go run main.go
 ```
 
+## Optional: Persistent Database for sent-state
+
+By default the bot persists announced contest IDs to a local JSON file. For production (and to avoid re-sends after deploys) use a Postgres database and set `DATABASE_URL`.
+
+- Create a Postgres instance (Railway offers an easy addon) and copy the connection URL.
+- Set `DATABASE_URL` in your environment or in Railway project variables.
+
+The bot will automatically create the `sent_contests` table when it detects `DATABASE_URL`:
+
+```sql
+CREATE TABLE IF NOT EXISTS sent_contests (
+	environment text NOT NULL,
+	contest_id integer NOT NULL,
+	sent_at timestamptz DEFAULT now(),
+	PRIMARY KEY (environment, contest_id)
+);
+```
+
+Environment isolation: set `ENVIRONMENT` to `main`, `staging`, or `test` so each deployment keeps separate sent-state.
+
+
 ## Files
 
 - `main.go` — application entry point

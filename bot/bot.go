@@ -51,6 +51,25 @@ var (
 	contestMessageStoreLock sync.Mutex
 )
 
+func environmentName() string {
+	env := strings.TrimSpace(os.Getenv("ENVIRONMENT"))
+	if env == "" {
+		return "default"
+	}
+	return env
+}
+
+func init() {
+	env := environmentName()
+	sentContestsFile = fmt.Sprintf("sent_contests_%s.json", env)
+	contestMessageStoreFile = fmt.Sprintf("sent_contest_messages_%s.json", env)
+	log.Printf("using storage files %s and %s (ENVIRONMENT=%s)", sentContestsFile, contestMessageStoreFile, env)
+	if !announcementsEnabled() {
+		log.Println("announcements are disabled by environment (CI or DISABLE_ANNOUNCEMENTS)")
+	}
+	initDB()
+}
+
 type storedContestMessage struct {
 	ChannelID string `json:"channelId"`
 	Content   string `json:"content"`
@@ -99,12 +118,11 @@ func formatContestDiscordMessage(info Info, remaining time.Duration) string {
 	}
 
 	message := fmt.Sprintf(
-		"**%s**\nType: %s\nDuration: %d min\nStart time (Cairo): %s\nEnd time (Cairo): %s\nLink: https://codeforces.com/contests",
+		"**%s**\nType: %s\nDuration: %d min\nStart time (Cairo): %s\nLink: https://codeforces.com/contests",
 		info.Name,
 		info.Type,
 		info.DurationSeconds/60,
 		formatContestTime(info.StartTimeSeconds),
-		formatContestTime(info.EndTimeSeconds),
 	)
 
 	if daysAvailable > 0 {
@@ -151,7 +169,7 @@ func saveContestMessagesLocked(storedMessages map[string]storedContestMessage) {
 		return
 	}
 
-	if err := os.WriteFile(contestMessageStoreFile, data, 0o644); err != nil {
+	if err := writeAtomic(contestMessageStoreFile, data, 0o644); err != nil {
 		log.Println("failed to save contest messages:", err)
 	}
 }
@@ -316,6 +334,49 @@ func sendUpcomingContests(discord *discordgo.Session, interaction *discordgo.Int
 	}
 }
 
+func sendAnnouncedContests(discord *discordgo.Session, interaction *discordgo.InteractionCreate) {
+	if err := discord.InteractionRespond(interaction.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+	}); err != nil {
+		log.Println("failed to defer interaction response:", err)
+		return
+	}
+
+	sentIDs := loadSentContestIDs()
+
+	contests, err := getContestList()
+	if err != nil {
+		_, _ = discord.FollowupMessageCreate(interaction.Interaction, true, &discordgo.WebhookParams{
+			Content: "Failed to fetch contests from Codeforces.",
+		})
+		log.Println("failed to fetch contest list:", err)
+		return
+	}
+
+	announced := make([]string, 0)
+	for _, c := range contests {
+		if _, ok := sentIDs[c.ID]; ok {
+			announced = append(announced, formatContestSummary(c))
+		}
+	}
+
+	if len(announced) == 0 {
+		_, _ = discord.FollowupMessageCreate(interaction.Interaction, true, &discordgo.WebhookParams{
+			Content: "No contests have been announced yet for this environment.",
+		})
+		return
+	}
+
+	for _, chunk := range splitDiscordMessageParts(announced, 1800) {
+		if _, err := discord.FollowupMessageCreate(interaction.Interaction, true, &discordgo.WebhookParams{
+			Content: chunk,
+		}); err != nil {
+			log.Println("failed to send announced contests chunk:", err)
+			continue
+		}
+	}
+}
+
 func getContestList() ([]Info, error) {
 	request, err := http.NewRequest(http.MethodGet, "https://codeforces.com/api/contest.list?gym=false", nil)
 	if err != nil {
@@ -348,6 +409,15 @@ func getContestList() ([]Info, error) {
 }
 
 func loadSentContestIDs() map[int]struct{} {
+	if useDB {
+		ids, err := loadSentContestIDsDB(environmentName())
+		if err != nil {
+			log.Println("failed to load sent contest IDs from database:", err)
+			return map[int]struct{}{}
+		}
+		return ids
+	}
+
 	sentContestsFileLock.Lock()
 	defer sentContestsFileLock.Unlock()
 
@@ -370,6 +440,12 @@ func loadSentContestIDs() map[int]struct{} {
 }
 
 func saveSentContestIDs(sentContestIDs map[int]struct{}) {
+	if useDB {
+		if err := saveSentContestIDsDB(sentContestIDs, environmentName()); err != nil {
+			log.Println("failed to save sent contest IDs to database:", err)
+		}
+		return
+	}
 	contestIDs := make([]int, 0, len(sentContestIDs))
 	for contestID := range sentContestIDs {
 		contestIDs = append(contestIDs, contestID)
@@ -385,12 +461,38 @@ func saveSentContestIDs(sentContestIDs map[int]struct{}) {
 	sentContestsFileLock.Lock()
 	defer sentContestsFileLock.Unlock()
 
-	if err := os.WriteFile(sentContestsFile, data, 0o644); err != nil {
+	if err := writeAtomic(sentContestsFile, data, 0o644); err != nil {
 		log.Println("failed to save sent contest IDs:", err)
 	}
 }
 
+func writeAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, perm); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+func announcementsEnabled() bool {
+	if strings.ToLower(strings.TrimSpace(os.Getenv("DISABLE_ANNOUNCEMENTS"))) == "true" {
+		return false
+	}
+	if strings.ToLower(strings.TrimSpace(os.Getenv("CI"))) == "true" {
+		return false
+	}
+	if v := strings.TrimSpace(os.Getenv("ANNOUNCEMENTS_ENABLED")); v != "" {
+		return strings.ToLower(v) == "true"
+	}
+	return true
+}
+
 func sendNewContestAnnouncements(discord *discordgo.Session) {
+	if !announcementsEnabled() {
+		log.Println("Announcements disabled by environment; skipping sending new contest announcements")
+		return
+	}
+
 	announcementChannel := announcementChannelID()
 	if announcementChannel == "" {
 		log.Println("DISCORD_ANNOUNCEMENT_CHANNEL_ID is not set; skipping contest announcements")
@@ -444,6 +546,9 @@ func Run() {
 	discord, err := discordgo.New("Bot " + BotToken)
 	checkNilErr(err)
 
+	env := environmentName()
+	log.Printf("starting bot (ENVIRONMENT=%s), announcementsEnabled=%v", env, announcementsEnabled())
+
 	discord.AddHandler(newMessage)
 	discord.AddHandler(handleMessageDelete)
 	discord.AddHandler(handleReady)
@@ -465,11 +570,16 @@ func handleInteractionCreate(discord *discordgo.Session, interaction *discordgo.
 	}
 
 	data := interaction.ApplicationCommandData()
-	if data.Name != sendAvailableContestCommandName && data.Name != showAllAvailableContestCommandName && data.Name != showAllAvailbleContestCommandName {
+	switch data.Name {
+	case sendAvailableContestCommandName:
+		// sendAvailableContest should show contests that have been announced,
+		// not trigger new sends. Use the announced-list handler.
+		sendAnnouncedContests(discord, interaction)
+	case showAllAvailableContestCommandName, showAllAvailbleContestCommandName:
+		sendAnnouncedContests(discord, interaction)
+	default:
 		return
 	}
-
-	sendUpcomingContests(discord, interaction)
 }
 
 func handleMessageDelete(discord *discordgo.Session, messageDelete *discordgo.MessageDelete) {
@@ -505,18 +615,37 @@ func newMessage(discord *discordgo.Session, message *discordgo.MessageCreate) {
 	if !strings.HasPrefix(content, "!contest") {
 		return
 	}
+	// Use `!contest` to show all contests that have already been announced
+	// for this environment. This keeps one consistent command for listing.
+	postAnnouncedContestsChannel(discord, message.ChannelID)
+}
 
-	payload := strings.TrimSpace(strings.TrimPrefix(content, "!contest"))
-	if payload == "" {
-		_, _ = discord.ChannelMessageSend(message.ChannelID, "Send contest data as JSON after !contest.")
+func postAnnouncedContestsChannel(discord *discordgo.Session, channelID string) {
+	sentIDs := loadSentContestIDs()
+
+	contests, err := getContestList()
+	if err != nil {
+		_, _ = discord.ChannelMessageSend(channelID, "Failed to fetch contests from Codeforces.")
+		log.Println("failed to fetch contest list:", err)
 		return
 	}
 
-	var info Info
-	if err := json.Unmarshal([]byte(payload), &info); err != nil {
-		_, _ = discord.ChannelMessageSend(message.ChannelID, "Invalid contest JSON payload.")
+	announced := make([]string, 0)
+	for _, c := range contests {
+		if _, ok := sentIDs[c.ID]; ok {
+			announced = append(announced, formatContestSummary(c))
+		}
+	}
+
+	if len(announced) == 0 {
+		_, _ = discord.ChannelMessageSend(channelID, "No contests have been announced yet for this environment.")
 		return
 	}
 
-	_, _ = discord.ChannelMessageSend(message.ChannelID, formatContestSummary(info))
+	for _, chunk := range splitDiscordMessageParts(announced, 1800) {
+		if _, err := discord.ChannelMessageSend(channelID, chunk); err != nil {
+			log.Println("failed to send announced contests chunk:", err)
+			continue
+		}
+	}
 }
