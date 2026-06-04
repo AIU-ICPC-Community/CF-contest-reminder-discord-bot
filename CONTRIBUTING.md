@@ -24,3 +24,22 @@ On the Pull Request please include:
 - Whether you used AI tools and how they were used.
 
 small contributions are welcome!
+
+**Running Tests**
+- **CI**: Tests run automatically on every push and pull request via the GitHub Actions workflow at `.github/workflows/go.yml`.
+	- The workflow runs `go build` and `go test ./...` and will fail the run if tests fail.
+
+- **Run tests locally**:
+
+```bash
+# run all tests in the repository
+go test ./...
+
+# run tests for the `bot` package with verbose output
+go test ./bot -v
+
+# run a single test by name in the `bot` package
+go test -run TestFormatContestDiscordMessage ./bot -v
+```
+
+- **Before opening a Pull Request**: ensure `go test ./...` passes locally and push your branch so CI can run the same checks.

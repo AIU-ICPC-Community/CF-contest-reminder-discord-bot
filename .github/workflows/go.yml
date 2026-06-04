@@ -5,9 +5,11 @@ name: Go
 
 on:
   push:
-    branches: ["main"]
+    # run tests on every branch push
+    branches: ["**"]
   pull_request:
-    branches: ["main"]
+    # run tests for pull requests targeting any branch
+    branches: ["**"]
 
 jobs:
   build:
