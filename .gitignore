@@ -39,3 +39,6 @@ sent_contest_messages*.json
 # local editor noise
 .DS_Store
 *.swp
+ 
+# local test files
+ids.txt
